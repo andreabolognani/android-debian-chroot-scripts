@@ -1,0 +1,149 @@
+#!/bin/sh
+
+# start - Start a Debian chroot
+# This file is part of android-debian-chroot-scripts
+# Copyright (C) 2014  Andrea Bolognani <eof@kiyuko.org>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+die() {
+	echo "$@" >&2
+	cleanup
+	exit 1
+}
+
+cleanup() {
+	umount "$ROOT" >/dev/null 2>&1
+}
+
+isrunning() {
+	typeset end="/.root/$NAME"
+	typeset -R"${#end}" tmp
+	typeset f=$(mktemp)
+	let rc=1
+
+	df >"$f"
+	while read fs _
+	do
+		tmp=$fs
+		test "$tmp" = "$end" && {
+			let rc=0
+			break
+		}
+	done <"$f"
+	rm -f "$f"
+
+	return $rc
+}
+
+checkcommands() {
+	type chroot >/dev/null 2>&1 || {
+		die "chroot: Command not found"
+	}
+	type mktemp >/dev/null 2>&1 || {
+		die "mktemp: Command not found"
+	}
+	type losetup >/dev/null 2>&1 || {
+		die "losetup: Command not found"
+	}
+	type mknod >/dev/null 2>&1 || {
+		die "mknod: Command not found"
+	}
+}
+
+findloop() {
+	let i=10
+	while test -b "/dev/block/loop$i"
+	do
+		let i++
+	done
+	((i <= 99)) || {
+		die "All loopback devices are taken"
+	}
+	echo "$i"
+}
+
+createloop() {
+	typeset i=$1
+	mount -o rw,remount rootfs / || {
+		die "Unable to remount / in read-write mode"
+	}
+	mknod "/dev/block/loop$i" b 7 "$i" || {
+		die "Unable to create loopback device /dev/block/loop$i"
+	}
+	mount -o ro,remount rootfs / || {
+		die "Unable to remount / in read-only mode"
+	}
+}
+
+setup() {
+	test -f "$IMAGE" || {
+		die "$IMAGE: No such file or directory"
+	}
+	mkdir -p "$ROOT" 2>/dev/null
+	test -d "$ROOT" || {
+		die "$ROOT: No such directory"
+	}
+
+	checkcommands	
+
+	isrunning && {
+		die "Already running"
+	}
+
+	i=$(findloop)
+	createloop "$i"
+
+	losetup "/dev/block/loop$i" "$IMAGE" || {
+		die "Unable to setup loop mounting"
+	}
+
+	mount -t ext4 "/dev/block/loop$i" "$ROOT" || {
+		die "Unable to mount image"
+	}
+	mount -o bind /dev "$ROOT/dev" || {
+		die "Unable to mount $ROOT/dev"
+	}
+	mount -t devpts none "$ROOT/dev/pts" || {
+		die "Unable to mount $ROOT/dev/pts"
+	}
+	mount -t proc none "$ROOT/proc" || {
+		die "Unable to mount $ROOT/proc"
+	}
+	mount -t sysfs none "$ROOT/sys" || {
+		die "Unable to mount $ROOT/sys"
+	}
+
+	chroot "$ROOT" /bin/sh -c \
+		"export PATH=/usr/sbin:/usr/bin:/sbin:/bin;
+		 test -f /etc/init.d/ssh && /etc/init.d/ssh start"
+}
+
+main() {
+	BASE=$(dirname "$0")
+	NAME=${1:-default}
+	ROOT="$BASE/.root/$NAME"
+	IMAGE="$BASE/images/$NAME.img"
+
+	test "$(whoami)" = root || {
+		die "Must be run as root"
+	}
+
+	setup
+	
+	exit 0
+}
+
+main "$@"
